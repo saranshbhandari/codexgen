@@ -1,0 +1,371 @@
+package com.test.dataflowengine.processors.taskprocessors.helpers;
+
+import com.test.dataflowengine.models.tasksettings.subsettings.SourceDestinationMapping;
+import lombok.extern.slf4j.Slf4j;
+
+import java.math.BigDecimal;
+import java.sql.Date;
+import java.sql.Timestamp;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.OffsetDateTime;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
+import java.util.*;
+
+/**
+ * Centralised, optimised datatype conversion between source and destination.
+ *
+ * Key ideas:
+ *  - We precompute a ConversionPlan per task so we don't parse DB types
+ *    on every row.
+ *  - Only columns that actually need conversion are in the plan.
+ *  - Conversion is applied in-place on the row map (values replaced, keys same).
+ */
+@Slf4j
+public final class DataConverter {
+
+    private DataConverter() {}
+
+    // ========================================================================
+    // Public API
+    // ========================================================================
+
+    /** Immutable description of how to convert each column. */
+    public static final class ConversionPlan {
+        private final List<ColumnPlan> columns;
+
+        private ConversionPlan(List<ColumnPlan> columns) {
+            this.columns = columns;
+        }
+    }
+
+    private static final class ColumnPlan {
+        private final String sourceColumnName;
+        private final LogicalType targetType;
+
+        private ColumnPlan(String sourceColumnName, LogicalType targetType) {
+            this.sourceColumnName = sourceColumnName;
+            this.targetType = targetType;
+        }
+    }
+
+    /**
+     * Build a reusable conversion plan for this task.
+     *
+     * @param mappings     source->destination mappings (from DataTaskSettings)
+     * @param sourceVendor e.g. "ORACLE", "MYSQL", "SQLSERVER", may be null
+     * @param destVendor   e.g. "ORACLE", "MYSQL", "SQLSERVER", may be null
+     */
+    public static ConversionPlan prepareConversionPlan(
+            List<SourceDestinationMapping> mappings,
+            String sourceVendor,
+            String destVendor) {
+
+        if (mappings == null || mappings.isEmpty()) {
+            return new ConversionPlan(Collections.emptyList());
+        }
+
+        List<ColumnPlan> cols = new ArrayList<>();
+
+        for (SourceDestinationMapping m : mappings) {
+            String srcCol = m.getSourceColumnName();
+            if (srcCol == null || srcCol.isBlank()) {
+                // typically "only destination has default" columns – no source value to convert
+                continue;
+            }
+
+            LogicalType destLogical = inferLogicalType(m.getDestinationColumnType(), destVendor);
+            LogicalType srcLogical  = inferLogicalType(m.getSourceColumnType(), sourceVendor);
+
+            // Decide final target type:
+            //   1) Prefer destination logical type if known
+            //   2) Else fall back to source logical type
+            LogicalType target = destLogical != LogicalType.UNKNOWN
+                                 ? destLogical
+                                 : srcLogical;
+
+            // If still unknown (e.g. all VARCHAR and user didn't specify),
+            // we don't bother converting.
+            if (target == LogicalType.UNKNOWN) {
+                continue;
+            }
+
+            // No need to convert "string-like" columns; DB / writer is happy with a String.
+            if (target == LogicalType.STRING) {
+                continue;
+            }
+
+            cols.add(new ColumnPlan(srcCol, target));
+        }
+
+        return new ConversionPlan(Collections.unmodifiableList(cols));
+    }
+
+    /**
+     * Apply the conversion plan to a batch of rows in-place.
+     * Map keys remain the same; only values change.
+     */
+    public static void convertBatchInPlace(
+            List<Map<String, Object>> rows,
+            ConversionPlan plan) {
+
+        if (rows == null || rows.isEmpty() || plan == null || plan.columns.isEmpty()) {
+            return;
+        }
+
+        for (Map<String, Object> row : rows) {
+            if (row == null || row.isEmpty()) {
+                continue;
+            }
+
+            for (ColumnPlan cp : plan.columns) {
+                Object raw = row.get(cp.sourceColumnName);
+                if (raw == null) {
+                    continue;
+                }
+
+                try {
+                    Object converted = convertToTarget(raw, cp.targetType);
+                    row.put(cp.sourceColumnName, converted);
+                } catch (Exception ex) {
+                    log.warn("Data conversion failed for column '{}', value='{}'. Keeping original. Cause={}",
+                            cp.sourceColumnName, raw, ex.toString());
+                    // keep original raw value on failure
+                }
+            }
+        }
+    }
+
+    // ========================================================================
+    // Logical types & type inference
+    // ========================================================================
+
+    private enum LogicalType {
+        STRING, INTEGER, LONG, DECIMAL, BOOLEAN, DATE, TIMESTAMP, UNKNOWN
+    }
+
+    /**
+     * Map DB/vendor specific type name to logical type.
+     *
+     * dbType examples:
+     *   "VARCHAR2(100)", "NUMBER(10,2)", "DATE", "TIMESTAMP(6)"
+     * vendor examples:
+     *   "ORACLE", "MYSQL", "SQLSERVER"
+     */
+    private static LogicalType inferLogicalType(String dbType, String vendor) {
+        if (dbType == null) return LogicalType.UNKNOWN;
+
+        String t = dbType.trim();
+        if (t.isEmpty()) return LogicalType.UNKNOWN;
+
+        // Strip length/precision: VARCHAR2(100) -> VARCHAR2
+        int paren = t.indexOf('(');
+        if (paren > 0) {
+            t = t.substring(0, paren);
+        }
+        t = t.toUpperCase(Locale.ROOT);
+
+        // Generic hints from config/metadata
+        if (t.equals("STRING") || t.equals("TEXT")) return LogicalType.STRING;
+        if (t.equals("DATE")) return LogicalType.DATE;
+        if (t.equals("DATETIME")) return LogicalType.TIMESTAMP;
+        if (t.equals("TIMESTAMP")) return LogicalType.TIMESTAMP;
+        if (t.equals("BOOL") || t.equals("BOOLEAN")) return LogicalType.BOOLEAN;
+        if (t.equals("INT") || t.equals("INTEGER")) return LogicalType.INTEGER;
+        if (t.equals("LONG")) return LogicalType.LONG;
+        if (t.equals("NUMBER") || t.equals("DECIMAL") || t.equals("NUMERIC")) return LogicalType.DECIMAL;
+
+        // Vendor-specific
+        if (vendor != null) {
+            String v = vendor.toUpperCase(Locale.ROOT);
+
+            // ORACLE
+            if (v.contains("ORACLE")) {
+                if (t.startsWith("VARCHAR") || t.contains("CLOB") || t.startsWith("CHAR"))
+                    return LogicalType.STRING;
+                if (t.startsWith("TIMESTAMP"))
+                    return LogicalType.TIMESTAMP;
+                if (t.equals("NUMBER"))
+                    return LogicalType.DECIMAL;
+            }
+
+            // MYSQL
+            if (v.contains("MYSQL")) {
+                if (t.startsWith("VARCHAR") || t.startsWith("CHAR") || t.contains("TEXT"))
+                    return LogicalType.STRING;
+                if (t.equals("INT") || t.equals("MEDIUMINT") || t.equals("SMALLINT"))
+                    return LogicalType.INTEGER;
+                if (t.equals("BIGINT"))
+                    return LogicalType.LONG;
+                if (t.equals("TINYINT"))
+                    return LogicalType.INTEGER;  // often boolean(0/1)
+                if (t.startsWith("DECIMAL") || t.startsWith("NUMERIC") ||
+                    t.startsWith("DOUBLE") || t.startsWith("FLOAT"))
+                    return LogicalType.DECIMAL;
+                if (t.equals("DATE"))
+                    return LogicalType.DATE;
+                if (t.startsWith("DATETIME") || t.startsWith("TIMESTAMP"))
+                    return LogicalType.TIMESTAMP;
+            }
+
+            // SQL SERVER
+            if (v.contains("SQLSERVER") || v.contains("SQL_SERVER") || v.equals("MSSQL")) {
+                if (t.startsWith("VARCHAR") || t.startsWith("NVARCHAR") ||
+                    t.startsWith("CHAR") || t.contains("TEXT"))
+                    return LogicalType.STRING;
+                if (t.equals("INT") || t.equals("SMALLINT") || t.equals("TINYINT"))
+                    return LogicalType.INTEGER;
+                if (t.equals("BIGINT"))
+                    return LogicalType.LONG;
+                if (t.startsWith("DECIMAL") || t.startsWith("NUMERIC") || t.startsWith("MONEY"))
+                    return LogicalType.DECIMAL;
+                if (t.equals("DATE"))
+                    return LogicalType.DATE;
+                if (t.startsWith("DATETIME") || t.startsWith("SMALLDATETIME") || t.startsWith("DATETIME2"))
+                    return LogicalType.TIMESTAMP;
+                if (t.equals("BIT"))
+                    return LogicalType.BOOLEAN;
+            }
+        }
+
+        return LogicalType.UNKNOWN;
+    }
+
+    // ========================================================================
+    // Per-type conversion helpers
+    // ========================================================================
+
+    private static Object convertToTarget(Object value, LogicalType target) {
+        switch (target) {
+            case STRING:
+                return value.toString();
+            case INTEGER:
+                return toInteger(value);
+            case LONG:
+                return toLong(value);
+            case DECIMAL:
+                return toDecimal(value);
+            case BOOLEAN:
+                return toBoolean(value);
+            case DATE:
+                return toSqlDate(value);
+            case TIMESTAMP:
+                return toSqlTimestamp(value);
+            default:
+                return value;
+        }
+    }
+
+    private static Integer toInteger(Object v) {
+        if (v instanceof Integer) return (Integer) v;
+        if (v instanceof Number) return ((Number) v).intValue();
+        String s = v.toString().trim();
+        if (s.isEmpty()) return null;
+        return Integer.valueOf(s);
+    }
+
+    private static Long toLong(Object v) {
+        if (v instanceof Long) return (Long) v;
+        if (v instanceof Number) return ((Number) v).longValue();
+        String s = v.toString().trim();
+        if (s.isEmpty()) return null;
+        return Long.valueOf(s);
+    }
+
+    private static BigDecimal toDecimal(Object v) {
+        if (v instanceof BigDecimal) return (BigDecimal) v;
+        if (v instanceof Number) return BigDecimal.valueOf(((Number) v).doubleValue());
+        String s = v.toString().trim();
+        if (s.isEmpty()) return null;
+        return new BigDecimal(s);
+    }
+
+    private static Boolean toBoolean(Object v) {
+        if (v instanceof Boolean) return (Boolean) v;
+        String s = v.toString().trim().toLowerCase(Locale.ROOT);
+        if (s.isEmpty()) return null;
+        if ("1".equals(s) || "y".equals(s) || "yes".equals(s) || "true".equals(s)) return Boolean.TRUE;
+        if ("0".equals(s) || "n".equals(s) || "no".equals(s) || "false".equals(s)) return Boolean.FALSE;
+        return Boolean.valueOf(s);
+    }
+
+    // ----- date / time -----
+
+    private static final List<DateTimeFormatter> DATE_FORMATS = List.of(
+            DateTimeFormatter.ISO_LOCAL_DATE,
+            DateTimeFormatter.ofPattern("yyyy-MM-dd"),
+            DateTimeFormatter.ofPattern("dd-MMM-yyyy", Locale.ENGLISH),
+            DateTimeFormatter.ofPattern("dd/MM/yyyy")
+    );
+
+    private static final List<DateTimeFormatter> DATE_TIME_FORMATS = List.of(
+            DateTimeFormatter.ISO_LOCAL_DATE_TIME,
+            DateTimeFormatter.ISO_OFFSET_DATE_TIME,
+            DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"),
+            DateTimeFormatter.ofPattern("dd-MMM-yyyy HH:mm:ss", Locale.ENGLISH)
+    );
+
+    private static Date toSqlDate(Object v) {
+        if (v instanceof Date) return (Date) v;
+        if (v instanceof java.util.Date) return new Date(((java.util.Date) v).getTime());
+        if (v instanceof LocalDate) return Date.valueOf((LocalDate) v);
+        if (v instanceof LocalDateTime) return Date.valueOf(((LocalDateTime) v).toLocalDate());
+
+        String s = v.toString().trim();
+        if (s.isEmpty()) return null;
+
+        for (DateTimeFormatter f : DATE_FORMATS) {
+            try {
+                LocalDate d = LocalDate.parse(s, f);
+                return Date.valueOf(d);
+            } catch (Exception ignored) {}
+        }
+
+        for (DateTimeFormatter f : DATE_TIME_FORMATS) {
+            try {
+                LocalDateTime dt = LocalDateTime.parse(s, f);
+                return Date.valueOf(dt.toLocalDate());
+            } catch (Exception ignored) {}
+        }
+
+        try {
+            OffsetDateTime odt = OffsetDateTime.parse(s);
+            return Date.valueOf(odt.atZoneSameInstant(ZoneId.systemDefault()).toLocalDate());
+        } catch (Exception ignored) {}
+
+        throw new IllegalArgumentException("Unable to parse DATE from: " + s);
+    }
+
+    private static Timestamp toSqlTimestamp(Object v) {
+        if (v instanceof Timestamp) return (Timestamp) v;
+        if (v instanceof java.util.Date) return new Timestamp(((java.util.Date) v).getTime());
+        if (v instanceof LocalDateTime) return Timestamp.valueOf((LocalDateTime) v);
+        if (v instanceof LocalDate) return Timestamp.valueOf(((LocalDate) v).atStartOfDay());
+
+        String s = v.toString().trim();
+        if (s.isEmpty()) return null;
+
+        for (DateTimeFormatter f : DATE_TIME_FORMATS) {
+            try {
+                LocalDateTime dt = LocalDateTime.parse(s, f);
+                return Timestamp.valueOf(dt);
+            } catch (Exception ignored) {}
+        }
+
+        try {
+            OffsetDateTime odt = OffsetDateTime.parse(s);
+            return Timestamp.from(odt.toInstant());
+        } catch (Exception ignored) {}
+
+        // maybe only a date string – treat as midnight
+        for (DateTimeFormatter f : DATE_FORMATS) {
+            try {
+                LocalDate d = LocalDate.parse(s, f);
+                return Timestamp.valueOf(d.atStartOfDay());
+            } catch (Exception ignored) {}
+        }
+
+        throw new IllegalArgumentException("Unable to parse TIMESTAMP from: " + s);
+    }
+}
