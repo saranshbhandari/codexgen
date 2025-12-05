@@ -11,35 +11,58 @@ import java.time.LocalDateTime;
 import java.time.OffsetDateTime;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
 
 /**
  * Centralised, optimised datatype conversion between source and destination.
  *
- * Key ideas:
- *  - We precompute a ConversionPlan per task so we don't parse DB types
- *    on every row.
- *  - Only columns that actually need conversion are in the plan.
- *  - Conversion is applied in-place on the row map (values replaced, keys same).
+ * Typical usage in DataTransferTaskProcessor:
+ *
+ *   String srcVendor  = resolveDbVendor(settings.getSource());
+ *   String destVendor = resolveDbVendor(settings.getDestination());
+ *
+ *   DataConverter.ConversionPlan plan =
+ *           DataConverter.prepareConversionPlan(settings.getMappings(), srcVendor, destVendor);
+ *
+ *   // For every batch (single or parallel) just before writer.writeBatch(batch):
+ *   DataConverter.convertBatchInPlace(batch, plan);
+ *
+ * Keys in the map remain the same (source column names). Only values are converted.
  */
 @Slf4j
 public final class DataConverter {
 
-    private DataConverter() {}
+    private DataConverter() {
+        // utility class
+    }
 
     // ========================================================================
     // Public API
     // ========================================================================
 
-    /** Immutable description of how to convert each column. */
+    /**
+     * Immutable description of how to convert each column.
+     * Safe to share across threads.
+     */
     public static final class ConversionPlan {
         private final List<ColumnPlan> columns;
 
         private ConversionPlan(List<ColumnPlan> columns) {
             this.columns = columns;
         }
+
+        boolean isEmpty() {
+            return columns == null || columns.isEmpty();
+        }
     }
 
+    /**
+     * Per-column conversion info, prepared once per task.
+     */
     private static final class ColumnPlan {
         private final String sourceColumnName;
         private final LogicalType targetType;
@@ -54,8 +77,8 @@ public final class DataConverter {
      * Build a reusable conversion plan for this task.
      *
      * @param mappings     source->destination mappings (from DataTaskSettings)
-     * @param sourceVendor e.g. "ORACLE", "MYSQL", "SQLSERVER", may be null
-     * @param destVendor   e.g. "ORACLE", "MYSQL", "SQLSERVER", may be null
+     * @param sourceVendor e.g. "ORACLE", "MYSQL", "SQLSERVER", may be null for file sources
+     * @param destVendor   e.g. "ORACLE", "MYSQL", "SQLSERVER", may be null for file destinations
      */
     public static ConversionPlan prepareConversionPlan(
             List<SourceDestinationMapping> mappings,
@@ -68,30 +91,27 @@ public final class DataConverter {
 
         List<ColumnPlan> cols = new ArrayList<>();
 
-        for (SourceDestinationMapping m : mappings) {
-            String srcCol = m.getSourceColumnName();
+        for (SourceDestinationMapping mapping : mappings) {
+            String srcCol = mapping.getSourceColumnName();
             if (srcCol == null || srcCol.isBlank()) {
-                // typically "only destination has default" columns – no source value to convert
+                // Typically "only destination has default" columns – no source value to convert
                 continue;
             }
 
-            LogicalType destLogical = inferLogicalType(m.getDestinationColumnType(), destVendor);
-            LogicalType srcLogical  = inferLogicalType(m.getSourceColumnType(), sourceVendor);
+            LogicalType destLogical = inferLogicalType(mapping.getDestinationColumnType(), destVendor);
+            LogicalType srcLogical  = inferLogicalType(mapping.getSourceColumnType(), sourceVendor);
 
-            // Decide final target type:
-            //   1) Prefer destination logical type if known
-            //   2) Else fall back to source logical type
-            LogicalType target = destLogical != LogicalType.UNKNOWN
-                                 ? destLogical
-                                 : srcLogical;
+            // 1) Prefer destination logical type if known
+            // 2) Else fall back to source logical type
+            LogicalType target = destLogical != LogicalType.UNKNOWN ? destLogical : srcLogical;
 
-            // If still unknown (e.g. all VARCHAR and user didn't specify),
+            // If still unknown (e.g. VARCHAR on both sides and user didn't give hints),
             // we don't bother converting.
             if (target == LogicalType.UNKNOWN) {
                 continue;
             }
 
-            // No need to convert "string-like" columns; DB / writer is happy with a String.
+            // No need to convert "string-like" columns; DB / writers are happy with a String.
             if (target == LogicalType.STRING) {
                 continue;
             }
@@ -110,7 +130,7 @@ public final class DataConverter {
             List<Map<String, Object>> rows,
             ConversionPlan plan) {
 
-        if (rows == null || rows.isEmpty() || plan == null || plan.columns.isEmpty()) {
+        if (rows == null || rows.isEmpty() || plan == null || plan.isEmpty()) {
             return;
         }
 
@@ -128,10 +148,14 @@ public final class DataConverter {
                 try {
                     Object converted = convertToTarget(raw, cp.targetType);
                     row.put(cp.sourceColumnName, converted);
-                } catch (Exception ex) {
-                    log.warn("Data conversion failed for column '{}', value='{}'. Keeping original. Cause={}",
-                            cp.sourceColumnName, raw, ex.toString());
-                    // keep original raw value on failure
+                } catch (IllegalArgumentException ex) {
+                    // Intentionally keep original value if conversion fails.
+                    log.trace(
+                            "Data conversion failed for column '{}', value='{}'. Keeping original. Cause={}",
+                            cp.sourceColumnName,
+                            raw,
+                            ex.getMessage()
+                    );
                 }
             }
         }
@@ -142,90 +166,140 @@ public final class DataConverter {
     // ========================================================================
 
     private enum LogicalType {
-        STRING, INTEGER, LONG, DECIMAL, BOOLEAN, DATE, TIMESTAMP, UNKNOWN
+        STRING,
+        INTEGER,
+        LONG,
+        DECIMAL,
+        BOOLEAN,
+        DATE,
+        TIMESTAMP,
+        UNKNOWN
     }
 
     /**
      * Map DB/vendor specific type name to logical type.
      *
      * dbType examples:
-     *   "VARCHAR2(100)", "NUMBER(10,2)", "DATE", "TIMESTAMP(6)"
+     *   "VARCHAR2(100)", "NUMBER(10,2)", "DATE", "TIMESTAMP(6)", "string", "date"
      * vendor examples:
      *   "ORACLE", "MYSQL", "SQLSERVER"
      */
     private static LogicalType inferLogicalType(String dbType, String vendor) {
-        if (dbType == null) return LogicalType.UNKNOWN;
+        if (dbType == null) {
+            return LogicalType.UNKNOWN;
+        }
 
-        String t = dbType.trim();
-        if (t.isEmpty()) return LogicalType.UNKNOWN;
+        String type = dbType.trim();
+        if (type.isEmpty()) {
+            return LogicalType.UNKNOWN;
+        }
 
         // Strip length/precision: VARCHAR2(100) -> VARCHAR2
-        int paren = t.indexOf('(');
+        int paren = type.indexOf('(');
         if (paren > 0) {
-            t = t.substring(0, paren);
+            type = type.substring(0, paren);
         }
-        t = t.toUpperCase(Locale.ROOT);
+        type = type.toUpperCase(Locale.ROOT);
 
-        // Generic hints from config/metadata
-        if (t.equals("STRING") || t.equals("TEXT")) return LogicalType.STRING;
-        if (t.equals("DATE")) return LogicalType.DATE;
-        if (t.equals("DATETIME")) return LogicalType.TIMESTAMP;
-        if (t.equals("TIMESTAMP")) return LogicalType.TIMESTAMP;
-        if (t.equals("BOOL") || t.equals("BOOLEAN")) return LogicalType.BOOLEAN;
-        if (t.equals("INT") || t.equals("INTEGER")) return LogicalType.INTEGER;
-        if (t.equals("LONG")) return LogicalType.LONG;
-        if (t.equals("NUMBER") || t.equals("DECIMAL") || t.equals("NUMERIC")) return LogicalType.DECIMAL;
+        // Generic hints from config/metadata (works for file sources)
+        if ("STRING".equals(type) || "TEXT".equals(type)) {
+            return LogicalType.STRING;
+        }
+        if ("DATE".equals(type)) {
+            return LogicalType.DATE;
+        }
+        if ("DATETIME".equals(type)) {
+            return LogicalType.TIMESTAMP;
+        }
+        if ("TIMESTAMP".equals(type)) {
+            return LogicalType.TIMESTAMP;
+        }
+        if ("BOOL".equals(type) || "BOOLEAN".equals(type)) {
+            return LogicalType.BOOLEAN;
+        }
+        if ("INT".equals(type) || "INTEGER".equals(type)) {
+            return LogicalType.INTEGER;
+        }
+        if ("LONG".equals(type)) {
+            return LogicalType.LONG;
+        }
+        if ("NUMBER".equals(type) || "DECIMAL".equals(type) || "NUMERIC".equals(type)) {
+            return LogicalType.DECIMAL;
+        }
 
-        // Vendor-specific
         if (vendor != null) {
             String v = vendor.toUpperCase(Locale.ROOT);
 
             // ORACLE
             if (v.contains("ORACLE")) {
-                if (t.startsWith("VARCHAR") || t.contains("CLOB") || t.startsWith("CHAR"))
+                if (type.startsWith("VARCHAR") || type.contains("CLOB") || type.startsWith("CHAR")) {
                     return LogicalType.STRING;
-                if (t.startsWith("TIMESTAMP"))
+                }
+                if (type.startsWith("TIMESTAMP")) {
                     return LogicalType.TIMESTAMP;
-                if (t.equals("NUMBER"))
+                }
+                if ("NUMBER".equals(type)) {
                     return LogicalType.DECIMAL;
+                }
             }
 
             // MYSQL
             if (v.contains("MYSQL")) {
-                if (t.startsWith("VARCHAR") || t.startsWith("CHAR") || t.contains("TEXT"))
+                if (type.startsWith("VARCHAR") || type.startsWith("CHAR") || type.contains("TEXT")) {
                     return LogicalType.STRING;
-                if (t.equals("INT") || t.equals("MEDIUMINT") || t.equals("SMALLINT"))
+                }
+                if ("INT".equals(type) || "MEDIUMINT".equals(type) || "SMALLINT".equals(type)) {
                     return LogicalType.INTEGER;
-                if (t.equals("BIGINT"))
+                }
+                if ("BIGINT".equals(type)) {
                     return LogicalType.LONG;
-                if (t.equals("TINYINT"))
-                    return LogicalType.INTEGER;  // often boolean(0/1)
-                if (t.startsWith("DECIMAL") || t.startsWith("NUMERIC") ||
-                    t.startsWith("DOUBLE") || t.startsWith("FLOAT"))
+                }
+                if ("TINYINT".equals(type)) {
+                    // Often used as boolean(0/1); we still treat it as integer here.
+                    return LogicalType.INTEGER;
+                }
+                if (type.startsWith("DECIMAL")
+                        || type.startsWith("NUMERIC")
+                        || type.startsWith("DOUBLE")
+                        || type.startsWith("FLOAT")) {
                     return LogicalType.DECIMAL;
-                if (t.equals("DATE"))
+                }
+                if ("DATE".equals(type)) {
                     return LogicalType.DATE;
-                if (t.startsWith("DATETIME") || t.startsWith("TIMESTAMP"))
+                }
+                if (type.startsWith("DATETIME") || type.startsWith("TIMESTAMP")) {
                     return LogicalType.TIMESTAMP;
+                }
             }
 
             // SQL SERVER
-            if (v.contains("SQLSERVER") || v.contains("SQL_SERVER") || v.equals("MSSQL")) {
-                if (t.startsWith("VARCHAR") || t.startsWith("NVARCHAR") ||
-                    t.startsWith("CHAR") || t.contains("TEXT"))
+            if (v.contains("SQLSERVER") || v.contains("SQL_SERVER") || "MSSQL".equals(v)) {
+                if (type.startsWith("VARCHAR")
+                        || type.startsWith("NVARCHAR")
+                        || type.startsWith("CHAR")
+                        || type.contains("TEXT")) {
                     return LogicalType.STRING;
-                if (t.equals("INT") || t.equals("SMALLINT") || t.equals("TINYINT"))
+                }
+                if ("INT".equals(type) || "SMALLINT".equals(type) || "TINYINT".equals(type)) {
                     return LogicalType.INTEGER;
-                if (t.equals("BIGINT"))
+                }
+                if ("BIGINT".equals(type)) {
                     return LogicalType.LONG;
-                if (t.startsWith("DECIMAL") || t.startsWith("NUMERIC") || t.startsWith("MONEY"))
+                }
+                if (type.startsWith("DECIMAL") || type.startsWith("NUMERIC") || type.startsWith("MONEY")) {
                     return LogicalType.DECIMAL;
-                if (t.equals("DATE"))
+                }
+                if ("DATE".equals(type)) {
                     return LogicalType.DATE;
-                if (t.startsWith("DATETIME") || t.startsWith("SMALLDATETIME") || t.startsWith("DATETIME2"))
+                }
+                if (type.startsWith("DATETIME")
+                        || type.startsWith("SMALLDATETIME")
+                        || type.startsWith("DATETIME2")) {
                     return LogicalType.TIMESTAMP;
-                if (t.equals("BIT"))
+                }
+                if ("BIT".equals(type)) {
                     return LogicalType.BOOLEAN;
+                }
             }
         }
 
@@ -237,135 +311,207 @@ public final class DataConverter {
     // ========================================================================
 
     private static Object convertToTarget(Object value, LogicalType target) {
-        switch (target) {
-            case STRING:
-                return value.toString();
-            case INTEGER:
-                return toInteger(value);
-            case LONG:
-                return toLong(value);
-            case DECIMAL:
-                return toDecimal(value);
-            case BOOLEAN:
-                return toBoolean(value);
-            case DATE:
-                return toSqlDate(value);
-            case TIMESTAMP:
-                return toSqlTimestamp(value);
-            default:
-                return value;
+        return switch (target) {
+            case STRING -> value.toString();
+            case INTEGER -> toInteger(value);
+            case LONG -> toLong(value);
+            case DECIMAL -> toDecimal(value);
+            case BOOLEAN -> toBoolean(value);
+            case DATE -> toSqlDate(value);
+            case TIMESTAMP -> toSqlTimestamp(value);
+            case UNKNOWN -> value;
+        };
+    }
+
+    private static Integer toInteger(Object value) {
+        if (value instanceof Integer integer) {
+            return integer;
         }
+        if (value instanceof Number number) {
+            return number.intValue();
+        }
+
+        String text = value.toString().trim();
+        if (text.isEmpty()) {
+            return null;
+        }
+        return Integer.valueOf(text);
     }
 
-    private static Integer toInteger(Object v) {
-        if (v instanceof Integer) return (Integer) v;
-        if (v instanceof Number) return ((Number) v).intValue();
-        String s = v.toString().trim();
-        if (s.isEmpty()) return null;
-        return Integer.valueOf(s);
+    private static Long toLong(Object value) {
+        if (value instanceof Long longValue) {
+            return longValue;
+        }
+        if (value instanceof Number number) {
+            return number.longValue();
+        }
+
+        String text = value.toString().trim();
+        if (text.isEmpty()) {
+            return null;
+        }
+        return Long.valueOf(text);
     }
 
-    private static Long toLong(Object v) {
-        if (v instanceof Long) return (Long) v;
-        if (v instanceof Number) return ((Number) v).longValue();
-        String s = v.toString().trim();
-        if (s.isEmpty()) return null;
-        return Long.valueOf(s);
+    private static BigDecimal toDecimal(Object value) {
+        if (value instanceof BigDecimal bigDecimal) {
+            return bigDecimal;
+        }
+        if (value instanceof Number number) {
+            return BigDecimal.valueOf(number.doubleValue());
+        }
+
+        String text = value.toString().trim();
+        if (text.isEmpty()) {
+            return null;
+        }
+        return new BigDecimal(text);
     }
 
-    private static BigDecimal toDecimal(Object v) {
-        if (v instanceof BigDecimal) return (BigDecimal) v;
-        if (v instanceof Number) return BigDecimal.valueOf(((Number) v).doubleValue());
-        String s = v.toString().trim();
-        if (s.isEmpty()) return null;
-        return new BigDecimal(s);
+    private static Boolean toBoolean(Object value) {
+        if (value instanceof Boolean bool) {
+            return bool;
+        }
+
+        String text = value.toString().trim().toLowerCase(Locale.ROOT);
+        if (text.isEmpty()) {
+            return null;
+        }
+
+        if ("1".equals(text) || "y".equals(text) || "yes".equals(text) || "true".equals(text)) {
+            return Boolean.TRUE;
+        }
+        if ("0".equals(text) || "n".equals(text) || "no".equals(text) || "false".equals(text)) {
+            return Boolean.FALSE;
+        }
+
+        return Boolean.valueOf(text);
     }
 
-    private static Boolean toBoolean(Object v) {
-        if (v instanceof Boolean) return (Boolean) v;
-        String s = v.toString().trim().toLowerCase(Locale.ROOT);
-        if (s.isEmpty()) return null;
-        if ("1".equals(s) || "y".equals(s) || "yes".equals(s) || "true".equals(s)) return Boolean.TRUE;
-        if ("0".equals(s) || "n".equals(s) || "no".equals(s) || "false".equals(s)) return Boolean.FALSE;
-        return Boolean.valueOf(s);
-    }
+    // ========================================================================
+    // Date / time parsing
+    // ========================================================================
 
-    // ----- date / time -----
-
+    /**
+     * Order is important: more common patterns first for performance.
+     * Includes ISO, yyyy-MM-dd, US-style MM/dd/yyyy, dd/MM/yyyy, dd-MMM-yyyy.
+     */
     private static final List<DateTimeFormatter> DATE_FORMATS = List.of(
-            DateTimeFormatter.ISO_LOCAL_DATE,
+            DateTimeFormatter.ISO_LOCAL_DATE,                         // 2024-12-05
             DateTimeFormatter.ofPattern("yyyy-MM-dd"),
-            DateTimeFormatter.ofPattern("dd-MMM-yyyy", Locale.ENGLISH),
-            DateTimeFormatter.ofPattern("dd/MM/yyyy")
+            DateTimeFormatter.ofPattern("MM/dd/yyyy"),                // 05/21/2024
+            DateTimeFormatter.ofPattern("dd/MM/yyyy"),
+            DateTimeFormatter.ofPattern("dd-MMM-yyyy", Locale.ENGLISH)
     );
 
+    /**
+     * DateTime patterns for values that contain both date and time.
+     * Includes ISO, yyyy-MM-dd HH:mm:ss, US-style MM/dd/yyyy HH:mm:ss, dd-MMM-yyyy HH:mm:ss.
+     */
     private static final List<DateTimeFormatter> DATE_TIME_FORMATS = List.of(
-            DateTimeFormatter.ISO_LOCAL_DATE_TIME,
+            DateTimeFormatter.ISO_LOCAL_DATE_TIME,                    // 2024-12-05T10:22:33
             DateTimeFormatter.ISO_OFFSET_DATE_TIME,
             DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"),
+            DateTimeFormatter.ofPattern("MM/dd/yyyy HH:mm:ss"),       // 05/21/2024 10:22:33
             DateTimeFormatter.ofPattern("dd-MMM-yyyy HH:mm:ss", Locale.ENGLISH)
     );
 
-    private static Date toSqlDate(Object v) {
-        if (v instanceof Date) return (Date) v;
-        if (v instanceof java.util.Date) return new Date(((java.util.Date) v).getTime());
-        if (v instanceof LocalDate) return Date.valueOf((LocalDate) v);
-        if (v instanceof LocalDateTime) return Date.valueOf(((LocalDateTime) v).toLocalDate());
-
-        String s = v.toString().trim();
-        if (s.isEmpty()) return null;
-
-        for (DateTimeFormatter f : DATE_FORMATS) {
-            try {
-                LocalDate d = LocalDate.parse(s, f);
-                return Date.valueOf(d);
-            } catch (Exception ignored) {}
+    private static Date toSqlDate(Object value) {
+        if (value instanceof Date sqlDate) {
+            return sqlDate;
+        }
+        if (value instanceof java.util.Date utilDate) {
+            return new Date(utilDate.getTime());
+        }
+        if (value instanceof LocalDate localDate) {
+            return Date.valueOf(localDate);
+        }
+        if (value instanceof LocalDateTime localDateTime) {
+            return Date.valueOf(localDateTime.toLocalDate());
         }
 
-        for (DateTimeFormatter f : DATE_TIME_FORMATS) {
+        String text = value.toString().trim();
+        if (text.isEmpty()) {
+            return null;
+        }
+
+        // Try pure date patterns first
+        for (DateTimeFormatter formatter : DATE_FORMATS) {
             try {
-                LocalDateTime dt = LocalDateTime.parse(s, f);
-                return Date.valueOf(dt.toLocalDate());
-            } catch (Exception ignored) {}
+                LocalDate parsed = LocalDate.parse(text, formatter);
+                return Date.valueOf(parsed);
+            } catch (Exception ignored) {
+                // Intentionally ignore and try next pattern
+            }
+        }
+
+        // If the string actually has time, parse and drop time part
+        for (DateTimeFormatter formatter : DATE_TIME_FORMATS) {
+            try {
+                LocalDateTime parsed = LocalDateTime.parse(text, formatter);
+                return Date.valueOf(parsed.toLocalDate());
+            } catch (Exception ignored) {
+                // Intentionally ignore and try next pattern
+            }
         }
 
         try {
-            OffsetDateTime odt = OffsetDateTime.parse(s);
-            return Date.valueOf(odt.atZoneSameInstant(ZoneId.systemDefault()).toLocalDate());
-        } catch (Exception ignored) {}
+            OffsetDateTime odt = OffsetDateTime.parse(text);
+            LocalDate localDate = odt.atZoneSameInstant(ZoneId.systemDefault()).toLocalDate();
+            return Date.valueOf(localDate);
+        } catch (Exception ignored) {
+            // Intentionally ignore and throw below
+        }
 
-        throw new IllegalArgumentException("Unable to parse DATE from: " + s);
+        throw new IllegalArgumentException("Unable to parse DATE from: " + text);
     }
 
-    private static Timestamp toSqlTimestamp(Object v) {
-        if (v instanceof Timestamp) return (Timestamp) v;
-        if (v instanceof java.util.Date) return new Timestamp(((java.util.Date) v).getTime());
-        if (v instanceof LocalDateTime) return Timestamp.valueOf((LocalDateTime) v);
-        if (v instanceof LocalDate) return Timestamp.valueOf(((LocalDate) v).atStartOfDay());
+    private static Timestamp toSqlTimestamp(Object value) {
+        if (value instanceof Timestamp timestamp) {
+            return timestamp;
+        }
+        if (value instanceof java.util.Date utilDate) {
+            return new Timestamp(utilDate.getTime());
+        }
+        if (value instanceof LocalDateTime localDateTime) {
+            return Timestamp.valueOf(localDateTime);
+        }
+        if (value instanceof LocalDate localDate) {
+            return Timestamp.valueOf(localDate.atStartOfDay());
+        }
 
-        String s = v.toString().trim();
-        if (s.isEmpty()) return null;
+        String text = value.toString().trim();
+        if (text.isEmpty()) {
+            return null;
+        }
 
-        for (DateTimeFormatter f : DATE_TIME_FORMATS) {
+        // Try datetime patterns
+        for (DateTimeFormatter formatter : DATE_TIME_FORMATS) {
             try {
-                LocalDateTime dt = LocalDateTime.parse(s, f);
-                return Timestamp.valueOf(dt);
-            } catch (Exception ignored) {}
+                LocalDateTime parsed = LocalDateTime.parse(text, formatter);
+                return Timestamp.valueOf(parsed);
+            } catch (Exception ignored) {
+                // Intentionally ignore and try next pattern
+            }
         }
 
         try {
-            OffsetDateTime odt = OffsetDateTime.parse(s);
+            OffsetDateTime odt = OffsetDateTime.parse(text);
             return Timestamp.from(odt.toInstant());
-        } catch (Exception ignored) {}
-
-        // maybe only a date string – treat as midnight
-        for (DateTimeFormatter f : DATE_FORMATS) {
-            try {
-                LocalDate d = LocalDate.parse(s, f);
-                return Timestamp.valueOf(d.atStartOfDay());
-            } catch (Exception ignored) {}
+        } catch (Exception ignored) {
+            // Intentionally ignore and try as date-only below
         }
 
-        throw new IllegalArgumentException("Unable to parse TIMESTAMP from: " + s);
+        // Maybe only a date string – treat as midnight
+        for (DateTimeFormatter formatter : DATE_FORMATS) {
+            try {
+                LocalDate parsed = LocalDate.parse(text, formatter);
+                return Timestamp.valueOf(parsed.atStartOfDay());
+            } catch (Exception ignored) {
+                // Intentionally ignore and try next pattern
+            }
+        }
+
+        throw new IllegalArgumentException("Unable to parse TIMESTAMP from: " + text);
     }
 }
