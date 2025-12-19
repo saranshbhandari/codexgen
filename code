@@ -1,0 +1,81 @@
+//reader
+
+ResultSet rs = statement.executeQuery();
+ResultSetMetaData meta = rs.getMetaData();
+int colCount = meta.getColumnCount();
+
+while (rs.next()) {
+    Map<String, Object> row = new HashMap<>();
+
+    for (int i = 1; i <= colCount; i++) {
+
+        Object value;
+        int sqlType = meta.getColumnType(i);   // <-- THIS is the line you asked about
+
+        switch (sqlType) {
+
+            case Types.BLOB, Types.BINARY, Types.VARBINARY, Types.LONGVARBINARY -> {
+                Blob blob = rs.getBlob(i);
+                value = (blob == null)
+                        ? null
+                        : blob.getBytes(1, (int) blob.length());
+            }
+
+            case Types.CLOB, Types.NCLOB, Types.LONGVARCHAR, Types.LONGNVARCHAR -> {
+                Clob clob = rs.getClob(i);
+                value = (clob == null)
+                        ? null
+                        : clob.getSubString(1, (int) clob.length());
+            }
+
+            case Types.SQLXML -> {
+                SQLXML xml = rs.getSQLXML(i);
+                value = (xml == null) ? null : xml.getString();
+            }
+
+            case Types.ARRAY -> {
+                Array array = rs.getArray(i);
+                value = (array == null) ? null : array.getArray();
+            }
+
+            case Types.STRUCT -> {
+                value = rs.getObject(i); // handled later by DataConverter
+            }
+
+            default -> value = rs.getObject(i);
+        }
+
+        String columnName = meta.getColumnLabel(i);
+        row.put(columnName, value);
+    }
+
+    rows.add(row);
+}
+
+
+
+
+//wrie
+
+
+if (v == null) {
+    ps.setNull(i, Types.NULL);
+}
+else if (v instanceof byte[] bytes) {
+    ps.setBytes(i, bytes);
+}
+else if (v instanceof String s && isClobColumn(i)) {
+    ps.setCharacterStream(i, new StringReader(s), s.length());
+}
+else if (v instanceof Map<?, ?> map) {
+    ps.setString(i, map.toString()); // UDT → JSON fallback
+}
+else if (v instanceof List<?> list) {
+    ps.setString(i, list.toString()); // ARRAY → JSON fallback
+}
+else {
+    ps.setObject(i, v);
+}
+
+
+
