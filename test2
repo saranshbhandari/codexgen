@@ -1,0 +1,109 @@
+<div class="task-settings-container">
+  <app-tasksettingsheader header="Var Assignment Task Settings"></app-tasksettingsheader>
+
+  <div class="" style="display: grid; grid-template-rows: 1fr auto;">
+    <form [formGroup]="form" class="lmn-container lmn-p-12px">
+
+      <!-- warning if ANY row violates numeric rule -->
+      <mt-alert
+        *ngIf="hasAnyInvalidRow"
+        type="warning"
+        message="Only variables with initial number value can be Increment/Decrement."
+        [size]="'sm'">
+      </mt-alert>
+
+      <div class="lmn-row lmn-mt-12px lmn-d-flex lmn-justify-content-end">
+        <div class="lmn-col-auto">
+          <button
+            type="button"
+            class="lmn-btn lmn-btn-primary lmn-ui-sm"
+            (click)="addRow()"
+            [disabled]="readonly">
+            Add New
+          </button>
+        </div>
+      </div>
+
+      <!-- header row -->
+      <div class="lmn-row lmn-mt-12px">
+        <div class="lmn-col-4">Variable</div>
+        <div class="lmn-col-3">Operation</div>
+        <div class="lmn-col-4">Value</div>
+        <div class="lmn-col-1"></div>
+      </div>
+
+      <!-- rows -->
+      <div formArrayName="VariableMappingList">
+        <div
+          class="lmn-row lmn-mb-24px lmn-ui-sm"
+          *ngFor="let row of mappingList.controls; let i = index"
+          [formGroupName]="i">
+
+          <div class="lmn-col-4">
+            <mt-dropdown
+              ariaLabel="Variable dropdown"
+              disabledField="disabled"
+              placeholder="Select"
+              showSearch
+              [items]="Variables"
+              formControlName="Variable">
+            </mt-dropdown>
+          </div>
+
+          <div class="lmn-col-3">
+            <mt-dropdown
+              ariaLabel="Operation dropdown"
+              disabledField="disabled"
+              placeholder="Select"
+              showSearch
+              [items]="Operations"
+              formControlName="Operation">
+            </mt-dropdown>
+
+            <!-- optional per-row warning (nice UX) -->
+            <div class="lmn-text-danger lmn-ui-xs lmn-mt-4px" *ngIf="rowNeedsNumberVariable(row as any)">
+              Increment/Decrement requires numeric variable.
+            </div>
+          </div>
+
+          <div class="lmn-col-4">
+            <app-special-text-input
+              placeholder="Value"
+              formControlName="Value"
+              [disabled]="(row.get('Operation')?.value !== 'SetTo') || readonly">
+            </app-special-text-input>
+          </div>
+
+          <div class="lmn-col-1">
+            <button
+              type="button"
+              aria-label="delete button"
+              mtButton="link"
+              isIconButton
+              class="lmn-text-danger lmn-mt-8px"
+              (click)="deleteRow(i)"
+              [disabled]="readonly || mappingList.length === 1">
+              <em class="lmnicon lmnicon-trash-o"></em>
+            </button>
+          </div>
+
+        </div>
+      </div>
+    </form>
+
+    <div class="lmn-d-flex lmn-justify-content-end lmn-m-12px">
+      <button type="button"
+              class="lmn-btn lmn-btn-secondary lmn-ui-sm"
+              (click)="close()">
+        Cancel
+      </button>
+
+      <button type="button"
+              class="lmn-btn lmn-ui-sm lmn-ml-12px lmn-btn-primary"
+              (click)="onSaveClick()"
+              [disabled]="readonly || form.invalid || hasAnyInvalidRow">
+        Save
+      </button>
+    </div>
+  </div>
+</div>
