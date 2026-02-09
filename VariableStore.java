@@ -10,24 +10,50 @@ public class VariableStore {
 
     private static final Logger log = LoggerFactory.getLogger(VariableStore.class);
 
+    public enum MissingVariablePolicy {
+        KEEP_AS_IS,
+        REPLACE_WITH_EMPTY,
+        THROW_ERROR
+    }
+
     private static final int MAX_EXPR_DEPTH = 50;
 
-    /* Permanent variables */
+    /* ========================= STATE ========================= */
+
     private final Map<String, Object> permanent = new ConcurrentHashMap<>();
 
-    /* Thread-local temporary overlays */
     private final ThreadLocal<Deque<Map<String, Object>>> overlays =
             ThreadLocal.withInitial(ArrayDeque::new);
 
-    /* Lazy in-memory cache (per VariableStore instance) */
     private final Map<String, CompiledTemplate> templateCache =
             new ConcurrentHashMap<>();
 
-    /* Expression depth guard */
     private final ThreadLocal<Integer> exprDepth =
             ThreadLocal.withInitial(() -> 0);
 
-    /* ========================= PUBLIC API ========================= */
+    private volatile MissingVariablePolicy missingVariablePolicy =
+            MissingVariablePolicy.REPLACE_WITH_EMPTY;
+
+    /* ========================= CONSTRUCTORS ========================= */
+
+    public VariableStore() { }
+
+    public VariableStore(MissingVariablePolicy policy) {
+        this.missingVariablePolicy = Objects.requireNonNull(policy);
+    }
+
+    /* ========================= CONFIG ========================= */
+
+    public void setMissingVariablePolicy(MissingVariablePolicy policy) {
+        this.missingVariablePolicy = Objects.requireNonNull(policy);
+        log.info("MissingVariablePolicy set to {}", policy);
+    }
+
+    public MissingVariablePolicy getMissingVariablePolicy() {
+        return missingVariablePolicy;
+    }
+
+    /* ========================= VARIABLES ========================= */
 
     public void addVariable(String name, Object value) {
         if (value == null) return;
@@ -38,10 +64,10 @@ public class VariableStore {
 
     public Scope withTempVariable(String name, Object value) {
         String base = normalizeBase(name);
-        Map<String, Object> m = new HashMap<>();
-        m.put(base, value);
+        Map<String, Object> layer = new HashMap<>();
+        layer.put(base, value);
 
-        overlays.get().push(m);
+        overlays.get().push(layer);
         log.debug("Pushed temp variable {}", base);
 
         return () -> {
@@ -51,15 +77,16 @@ public class VariableStore {
         };
     }
 
+    /* ========================= RESOLUTION ========================= */
+
     public String resolveVariables(String template) {
         if (template == null || template.isEmpty()) return template;
 
         CompiledTemplate ct = templateCache.computeIfAbsent(template, t -> {
-            log.debug("Template cache MISS, compiling: {}", t);
+            log.debug("Template cache MISS, compiling [{}]", t);
             return TemplateCompiler.compile(t);
         });
 
-        log.debug("Evaluating template");
         return ct.evaluate(this);
     }
 
@@ -95,6 +122,10 @@ public class VariableStore {
             log.debug("Variable {} not found", baseVar);
         }
         return v;
+    }
+
+    MissingVariablePolicy policy() {
+        return missingVariablePolicy;
     }
 
     private Object fromOverlay(String base) {
