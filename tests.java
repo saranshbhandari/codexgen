@@ -27,8 +27,8 @@ public class VariableStoreTestDriver {
         store.addVariable("SYSTEM", "ARR", List.of("A", "B", "C"));
 
         Map<String, Object> user = new HashMap<>();
-        user.put("name", "Saransh");
-        user.put("city", "Chandigarh");
+        user.put("name", "aa");
+        user.put("city", "sse");
 
         store.addVariable("SYSTEM", "User", user);
 
