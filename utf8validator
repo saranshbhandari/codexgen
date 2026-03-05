@@ -1,0 +1,59 @@
+import java.io.FileInputStream;
+import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.CharBuffer;
+import java.nio.charset.*;
+
+public class Utf8Validator {
+
+    public static void validateUtf8(String filePath) {
+        CharsetDecoder decoder = StandardCharsets.UTF_8
+                .newDecoder()
+                .onMalformedInput(CodingErrorAction.REPORT)
+                .onUnmappableCharacter(CodingErrorAction.REPORT);
+
+        byte[] buffer = new byte[8192];
+        long bytePosition = 0;
+
+        try (FileInputStream fis = new FileInputStream(filePath)) {
+
+            int bytesRead;
+            while ((bytesRead = fis.read(buffer)) != -1) {
+
+                ByteBuffer byteBuffer = ByteBuffer.wrap(buffer, 0, bytesRead);
+                CharBuffer charBuffer = CharBuffer.allocate(bytesRead);
+
+                CoderResult result = decoder.decode(byteBuffer, charBuffer, false);
+
+                if (result.isError()) {
+
+                    int errorIndex = byteBuffer.position();
+                    long errorBytePosition = bytePosition + errorIndex;
+
+                    System.out.println("Invalid UTF-8 detected!");
+                    System.out.println("Byte position: " + errorBytePosition);
+
+                    System.out.print("Problematic bytes: ");
+                    for (int i = errorIndex; i < Math.min(errorIndex + 8, bytesRead); i++) {
+                        System.out.printf("0x%02X ", buffer[i]);
+                    }
+                    System.out.println();
+
+                    return;
+                }
+
+                bytePosition += bytesRead;
+            }
+
+            System.out.println("File is valid UTF-8.");
+
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+
+    public static void main(String[] args) {
+        String file = "/path/to/file.txt";
+        validateUtf8(file);
+    }
+}
