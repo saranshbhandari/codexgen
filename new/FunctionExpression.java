@@ -49,6 +49,57 @@ final class FunctionExpression implements Expression {
             return false;
         }
 
+        // ✅ NOT_IN(value, option1, option2, ...)
+        if ("NOT_IN".equals(name)) {
+            if (args.size() < 2) {
+                throw new IllegalArgumentException("NOT_IN requires at least 2 args: NOT_IN(value, option1, ...)");
+            }
+        
+            Object val = store.resolveExpression(args.get(0));
+        
+            for (int i = 1; i < args.size(); i++) {
+                Object option = store.resolveExpression(args.get(i));
+                if (Functions.areEqual(val, option)) {
+                    return false; // short-circuit
+                }
+            }
+            return true;
+        }
+        
+        // ✅ CONTAINS(text, substring)
+        if ("CONTAINS".equals(name)) {
+            if (args.size() != 2) {
+                throw new IllegalArgumentException("CONTAINS requires 2 args: CONTAINS(text, substring)");
+            }
+        
+            Object textObj = store.resolveExpression(args.get(0));
+            Object subObj  = store.resolveExpression(args.get(1));
+        
+            if (textObj == null || subObj == null) return false;
+        
+            String text = String.valueOf(textObj);
+            String sub  = String.valueOf(subObj);
+        
+            return text.contains(sub);
+        }
+        
+        // ✅ CONTAINS_IGNORE_CASE(text, substring)
+        if ("CONTAINS_IGNORE_CASE".equals(name)) {
+            if (args.size() != 2) {
+                throw new IllegalArgumentException("CONTAINS_IGNORE_CASE requires 2 args");
+            }
+        
+            Object textObj = store.resolveExpression(args.get(0));
+            Object subObj  = store.resolveExpression(args.get(1));
+        
+            if (textObj == null || subObj == null) return false;
+        
+            String text = String.valueOf(textObj).toLowerCase();
+            String sub  = String.valueOf(subObj).toLowerCase();
+        
+            return text.contains(sub);
+        }
+
         // ✅ OR(cond1, cond2, ...) short-circuit
         if ("OR".equals(name)) {
             if (args.isEmpty()) return false; // OR() => false (neutral element)
