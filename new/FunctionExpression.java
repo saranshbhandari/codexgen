@@ -36,6 +36,19 @@ final class FunctionExpression implements Expression {
             return true;
         }
 
+        // ✅ IN(value, option1, option2, ...) short-circuit
+        if ("IN".equals(name)) {
+            if (args.size() < 2) {
+                throw new IllegalArgumentException("IN requires at least 2 args: IN(value, option1, ...)");
+            }
+            Object val = store.resolveExpression(args.get(0));
+            for (int i = 1; i < args.size(); i++) {
+                Object option = store.resolveExpression(args.get(i));
+                if (Functions.areEqual(val, option)) return true;
+            }
+            return false;
+        }
+
         // ✅ OR(cond1, cond2, ...) short-circuit
         if ("OR".equals(name)) {
             if (args.isEmpty()) return false; // OR() => false (neutral element)
