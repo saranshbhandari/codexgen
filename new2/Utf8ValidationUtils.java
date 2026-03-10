@@ -8,7 +8,10 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.nio.ByteBuffer;
 import java.nio.CharBuffer;
-import java.nio.charset.*;
+import java.nio.charset.CoderResult;
+import java.nio.charset.CodingErrorAction;
+import java.nio.charset.CharsetDecoder;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 
@@ -23,10 +26,9 @@ public final class Utf8ValidationUtils {
     }
 
     public static void validateUtf8File(Path path) throws IOException {
-        log.info("[Utf8ValidationUtils] Validating UTF-8 file. path={}", path);
+        log.info("[Utf8ValidationUtils] Validating UTF-8 file line by line. path={}", path);
 
         try (InputStream in = new BufferedInputStream(Files.newInputStream(path))) {
-
             ByteArrayOutputStream lineBuffer = new ByteArrayOutputStream(4096);
 
             long lineNumber = 1L;
@@ -55,7 +57,7 @@ public final class Utf8ValidationUtils {
         log.info("[Utf8ValidationUtils] UTF-8 validation passed. path={}", path);
     }
 
-    private static void validateLine(Path path, byte[] lineBytes, long lineNumber, long lineStartByteOffset)
+    public static String decodeUtf8Line(byte[] lineBytes, Path path, long lineNumber, long lineStartByteOffset)
             throws IOException {
 
         CharsetDecoder decoder = StandardCharsets.UTF_8
@@ -70,30 +72,32 @@ public final class Utf8ValidationUtils {
         if (result.isMalformed() || result.isUnmappable()) {
             long badByteOffset = lineStartByteOffset + input.position();
 
-            String preview = buildPreview(lineBytes);
-            String hex = buildHexPreview(lineBytes);
-
             throw new InvalidUtf8FileException(
                     "Invalid UTF-8 detected. path=" + path +
                     ", line=" + lineNumber +
                     ", byteOffset=" + badByteOffset +
-                    ", preview=\"" + preview + "\"" +
-                    ", hexPreview=" + hex
+                    ", preview=\"" + buildPreview(lineBytes) + "\"" +
+                    ", hexPreview=" + buildHexPreview(lineBytes)
             );
         }
 
         result = decoder.flush(output);
         if (result.isMalformed() || result.isUnmappable()) {
-            String preview = buildPreview(lineBytes);
-            String hex = buildHexPreview(lineBytes);
-
             throw new InvalidUtf8FileException(
                     "Invalid UTF-8 detected during decoder flush. path=" + path +
                     ", line=" + lineNumber +
-                    ", preview=\"" + preview + "\"" +
-                    ", hexPreview=" + hex
+                    ", preview=\"" + buildPreview(lineBytes) + "\"" +
+                    ", hexPreview=" + buildHexPreview(lineBytes)
             );
         }
+
+        output.flip();
+        return output.toString();
+    }
+
+    private static void validateLine(Path path, byte[] lineBytes, long lineNumber, long lineStartByteOffset)
+            throws IOException {
+        decodeUtf8Line(lineBytes, path, lineNumber, lineStartByteOffset);
     }
 
     private static String buildPreview(byte[] bytes) {
