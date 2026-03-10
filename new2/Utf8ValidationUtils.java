@@ -57,7 +57,7 @@ public final class Utf8ValidationUtils {
         log.info("[Utf8ValidationUtils] UTF-8 validation passed. path={}", path);
     }
 
-    public static String decodeUtf8Line(byte[] lineBytes, Path path, long lineNumber, long lineStartByteOffset)
+    private static void validateLine(Path path, byte[] lineBytes, long lineNumber, long lineStartByteOffset)
             throws IOException {
 
         CharsetDecoder decoder = StandardCharsets.UTF_8
@@ -90,14 +90,6 @@ public final class Utf8ValidationUtils {
                     ", hexPreview=" + buildHexPreview(lineBytes)
             );
         }
-
-        output.flip();
-        return output.toString();
-    }
-
-    private static void validateLine(Path path, byte[] lineBytes, long lineNumber, long lineStartByteOffset)
-            throws IOException {
-        decodeUtf8Line(lineBytes, path, lineNumber, lineStartByteOffset);
     }
 
     private static String buildPreview(byte[] bytes) {
