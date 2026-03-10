@@ -1,0 +1,304 @@
+package com.test.dataflowengine.processors.taskprocessors.datataskprocessorhelpers.datawriters;
+
+import com.test.dataflowengine.models.enums.FileDelimiter;
+import com.test.dataflowengine.models.tasksettings.DataTaskSettings;
+import com.test.dataflowengine.models.tasksettings.subsettings.FileSettings;
+import com.test.dataflowengine.processors.taskprocessors.datataskprocessorhelpers.Contracts.DataWriter;
+import com.test.dataflowengine.processors.taskprocessors.datataskprocessorhelpers.Contracts.SupportsPartitionFiles;
+
+import lombok.extern.slf4j.Slf4j;
+
+import java.io.*;
+import java.nio.charset.StandardCharsets;
+import java.util.*;
+
+@Slf4j
+public class CsvFileWriter implements DataWriter, SupportsPartitionFiles {
+
+    private final DataTaskSettings settings;
+    private final FileSettings fs;
+    private final boolean isPart;
+    private final String partPath;
+
+    private BufferedWriter writer;
+    private List<String> headerOrder;
+    private boolean headerWritten = false;
+    private String delimiter;
+
+    public CsvFileWriter(DataTaskSettings settings) {
+        this(settings, false, null);
+    }
+
+    private CsvFileWriter(DataTaskSettings settings, boolean isPart, String partPath) {
+        this.settings = settings;
+        this.fs = settings.getDestination().getFileSettings();
+        this.isPart = isPart;
+        this.partPath = partPath;
+    }
+
+    @Override
+    public void open() throws Exception {
+
+        String path = isPart ? partPath : fs.getFilePath();
+
+        delimiter = resolveDelimiter();
+
+        log.info("Opening CSV writer. path={}, delimiter='{}', partFile={}",
+                path, delimiter, isPart);
+
+        writer = new BufferedWriter(
+                new OutputStreamWriter(
+                        new FileOutputStream(path),
+                        StandardCharsets.UTF_8
+                )
+        );
+    }
+
+    @Override
+    public void writeBatch(List<Map<String, Object>> rows) throws Exception {
+
+        if (rows == null || rows.isEmpty()) {
+            log.debug("writeBatch called with empty rows");
+            return;
+        }
+
+        log.debug("Writing batch. rowCount={}", rows.size());
+
+        for (Map<String, Object> row : rows) {
+
+            if (row == null) {
+                continue;
+            }
+
+            if (headerOrder == null) {
+
+                headerOrder = new ArrayList<>(row.keySet());
+
+                log.debug("Detected CSV columns: {}", headerOrder);
+
+                if (Boolean.TRUE.equals(fs.isFirstRowColumn()) && !headerWritten) {
+                    log.debug("Writing CSV header row");
+                    writeHeader();
+                    headerWritten = true;
+                }
+            }
+
+            writeRow(row);
+        }
+
+        writer.flush();
+    }
+
+    private void writeHeader() throws IOException {
+
+        for (int i = 0; i < headerOrder.size(); i++) {
+
+            if (i > 0) {
+                writer.write(delimiter);
+            }
+
+            writer.write(escape(headerOrder.get(i)));
+        }
+
+        writer.newLine();
+    }
+
+    private void writeRow(Map<String, Object> row) throws IOException {
+
+        for (int i = 0; i < headerOrder.size(); i++) {
+
+            if (i > 0) {
+                writer.write(delimiter);
+            }
+
+            Object value = row.get(headerOrder.get(i));
+
+            writer.write(escape(value));
+        }
+
+        writer.newLine();
+    }
+
+    private String resolveDelimiter() {
+
+        FileDelimiter fileDelimiter = fs.getFileDelimiter();
+
+        if (fileDelimiter == null) {
+            log.warn("FileDelimiter not specified. Defaulting to comma.");
+            return ",";
+        }
+
+        switch (fileDelimiter) {
+
+            case COMMA:
+                return ",";
+
+            case TAB:
+                return "\t";
+
+            case PIPE:
+                return "|";
+
+            case CUSTOM:
+
+                if (fs.getCustomDelimiter() == null || fs.getCustomDelimiter().isEmpty()) {
+                    throw new IllegalArgumentException("CUSTOM delimiter selected but customDelimiter not provided");
+                }
+
+                log.info("Using custom delimiter: '{}'", fs.getCustomDelimiter());
+
+                return fs.getCustomDelimiter();
+
+            default:
+                return ",";
+        }
+    }
+
+    private String escape(Object value) {
+
+        if (value == null) {
+            return "";
+        }
+
+        String str = String.valueOf(value);
+
+        boolean mustQuote =
+                str.contains(delimiter) ||
+                str.contains("\"") ||
+                str.contains("\n") ||
+                str.contains("\r");
+
+        if (str.contains("\"")) {
+            str = str.replace("\"", "\"\"");
+        }
+
+        return mustQuote ? "\"" + str + "\"" : str;
+    }
+
+    @Override
+    public void commit() throws Exception {
+
+        if (writer != null) {
+            writer.flush();
+        }
+
+        log.debug("CSV writer commit complete");
+    }
+
+    @Override
+    public void rollback() {
+        log.warn("Rollback called on CsvFileWriter (no-op for file writer)");
+    }
+
+    @Override
+    public void close() {
+
+        try {
+
+            if (writer != null) {
+                writer.close();
+                log.info("CSV writer closed");
+            }
+
+        } catch (Exception e) {
+            log.error("Failed to close CSV writer", e);
+        }
+    }
+
+    @Override
+    public DataWriter createPartWriter(int partIndex) {
+
+        String basePath = fs.getFilePath();
+
+        String partFilePath = addPartSuffix(basePath, partIndex);
+
+        log.info("Creating CSV part writer. partIndex={}, file={}",
+                partIndex, partFilePath);
+
+        return new CsvFileWriter(settings, true, partFilePath);
+    }
+
+    @Override
+    public void mergeParts(int parts) throws Exception {
+
+        String finalFile = fs.getFilePath();
+
+        log.info("Merging CSV parts. totalParts={}, finalFile={}", parts, finalFile);
+
+        boolean writeHeader = Boolean.TRUE.equals(fs.isFirstRowColumn());
+
+        try (BufferedWriter out = new BufferedWriter(
+                new OutputStreamWriter(
+                        new FileOutputStream(finalFile),
+                        StandardCharsets.UTF_8
+                ))) {
+
+            boolean headerAlreadyWritten = false;
+
+            for (int p = 0; p < parts; p++) {
+
+                String partFile = addPartSuffix(finalFile, p);
+
+                log.debug("Processing part file {}", partFile);
+
+                try (BufferedReader br = new BufferedReader(
+                        new InputStreamReader(
+                                new FileInputStream(partFile),
+                                StandardCharsets.UTF_8
+                        ))) {
+
+                    String line;
+                    boolean firstLine = true;
+
+                    while ((line = br.readLine()) != null) {
+
+                        if (writeHeader && firstLine) {
+
+                            if (!headerAlreadyWritten) {
+
+                                out.write(line);
+                                out.newLine();
+
+                                headerAlreadyWritten = true;
+
+                                log.debug("Header written from part {}", p);
+                            }
+
+                            firstLine = false;
+                            continue;
+                        }
+
+                        out.write(line);
+                        out.newLine();
+
+                        firstLine = false;
+                    }
+                }
+
+                boolean deleted = new File(partFile).delete();
+
+                if (!deleted) {
+                    log.error("Failed to delete part file {}", partFile);
+                } else {
+                    log.debug("Deleted part file {}", partFile);
+                }
+            }
+        }
+
+        log.info("CSV merge completed successfully: {}", finalFile);
+    }
+
+    private String addPartSuffix(String filePath, int partIndex) {
+
+        int dotIndex = filePath.lastIndexOf('.');
+
+        if (dotIndex == -1) {
+            return filePath + "_part" + partIndex;
+        }
+
+        String name = filePath.substring(0, dotIndex);
+        String ext = filePath.substring(dotIndex);
+
+        return name + "_part" + partIndex + ext;
+    }
+}
