@@ -15,7 +15,12 @@ import java.io.BufferedReader;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
 
 @Slf4j
 public class CsvFileReader implements DataReader {
@@ -35,64 +40,64 @@ public class CsvFileReader implements DataReader {
 
     @Override
     public void open() throws Exception {
-        log.info("[CSVFileReader] Opening CSV parser. path={}", fs.getFilePath());
+        log.info("[CsvFileReader] Opening CSV reader. path={}", fs.getFilePath());
 
         validateSettings();
 
         try {
             Utf8ValidationUtils.validateUtf8File(fs.getFilePath());
         } catch (InvalidUtf8FileException e) {
-            log.error("[CSVFileReader] Invalid UTF-8 file. path={}, error={}", fs.getFilePath(), e.getMessage());
+            log.error("[CsvFileReader] Invalid UTF-8 file. path={}, error={}", fs.getFilePath(), e.getMessage());
             throw e;
         }
 
-        char delim = resolveDelimiterChar(fs);
+        char delimiter = resolveDelimiterChar(fs);
 
-        this.reader = Files.newBufferedReader(Path.of(fs.getFilePath()), StandardCharsets.UTF_8);
+        Path path = Path.of(fs.getFilePath());
+        this.reader = Files.newBufferedReader(path, StandardCharsets.UTF_8);
 
         CSVFormat format = CSVFormat.DEFAULT.builder()
-                .setDelimiter(delim)
+                .setDelimiter(delimiter)
                 .setQuote('"')
-                .setEscape(null)
                 .setIgnoreEmptyLines(true)
                 .setTrim(false)
-                .build();
+                .get();
 
-        this.parser = new CSVParser(reader, format);
+        this.parser = format.parse(reader);
         this.iterator = parser.iterator();
 
-        bufferedFirstRow = null;
-        headers.clear();
+        this.headers.clear();
+        this.bufferedFirstRow = null;
 
         if (!iterator.hasNext()) {
-            log.info("[CSVFileReader] CSV file is empty. path={}", fs.getFilePath());
+            log.warn("[CsvFileReader] CSV file is empty. path={}", fs.getFilePath());
             return;
         }
 
-        CSVRecord first;
+        CSVRecord firstRecord;
         try {
-            first = iterator.next();
+            firstRecord = iterator.next();
         } catch (Exception e) {
-            log.error("[CSVFileReader] Failed to read first CSV record. path={}", fs.getFilePath(), e);
+            log.error("[CsvFileReader] Failed to read first record. path={}", fs.getFilePath(), e);
             throw e;
         }
 
         if (Boolean.TRUE.equals(fs.isFirstRowColumn())) {
-            headers = normalizeHeaders(recordToList(first));
-            log.debug("[CSVFileReader] Header row detected. columns={}, headers={}", headers.size(), headers);
+            this.headers = normalizeHeaders(recordToList(firstRecord));
+            log.info("[CsvFileReader] Header row detected. columnCount={}, headers={}", headers.size(), headers);
         } else {
-            headers = generateHeaders(first.size());
-            bufferedFirstRow = rowFromRecord(first);
-            log.debug("[CSVFileReader] No header row. Generated columns={}, headers={}", headers.size(), headers);
+            this.headers = generateHeaders(firstRecord.size());
+            this.bufferedFirstRow = rowFromRecord(firstRecord);
+            log.info("[CsvFileReader] No header row present. Generated columnCount={}", headers.size());
         }
 
-        log.info("[CSVFileReader] CSV reader opened successfully. path={}, delimiter={}, isFirstRowColumn={}, columns={}",
-                fs.getFilePath(), fs.getFileDelimiter(), fs.isFirstRowColumn(), headers.size());
+        log.info("[CsvFileReader] CSV reader opened successfully. path={}, delimiter='{}', columnCount={}",
+                fs.getFilePath(), printableDelimiter(delimiter), headers.size());
     }
 
     @Override
     public List<Map<String, Object>> readBatch(int batchSize) throws Exception {
-        log.info("[CSVFileReader] Reading batch. batchSize={}", batchSize);
+        log.debug("[CsvFileReader] Reading batch. batchSize={}", batchSize);
 
         if (batchSize <= 0) {
             batchSize = 1000;
@@ -114,17 +119,21 @@ public class CsvFileReader implements DataReader {
         }
 
         while (batch.size() < batchSize && iterator.hasNext()) {
-            CSVRecord rec = null;
+            CSVRecord record = null;
 
             try {
-                rec = iterator.next();
-                batch.add(rowFromRecord(rec));
+                record = iterator.next();
+                batch.add(rowFromRecord(record));
             } catch (Exception e) {
-                if (rec != null) {
-                    log.error("[CSVFileReader] Error parsing CSV record. path={}, recordNumber={}, row={}",
-                            fs.getFilePath(), rec.getRecordNumber(), safeRecordToString(rec), e);
+                if (record != null) {
+                    log.error("[CsvFileReader] Faulty CSV row detected. path={}, recordNumber={}, charPosition={}, row={}",
+                            fs.getFilePath(),
+                            record.getRecordNumber(),
+                            record.getCharacterPosition(),
+                            safeRecordToString(record),
+                            e);
                 } else {
-                    log.error("[CSVFileReader] Error reading CSV record before record materialization. path={}",
+                    log.error("[CsvFileReader] CSV parsing failure before record creation. path={}",
                             fs.getFilePath(), e);
                 }
                 throw e;
@@ -135,19 +144,19 @@ public class CsvFileReader implements DataReader {
             return null;
         }
 
-        log.debug("[CSVFileReader] Batch read complete. path={}, rowsRead={}", fs.getFilePath(), batch.size());
+        log.debug("[CsvFileReader] Batch read complete. rowsRead={}", batch.size());
         return batch;
     }
 
     @Override
     public void close() {
-        log.info("[CSVFileReader] Closing CSV parser and reader. path={}", fs.getFilePath());
+        log.info("[CsvFileReader] Closing CSV reader. path={}", fs != null ? fs.getFilePath() : null);
 
         if (parser != null) {
             try {
                 parser.close();
             } catch (Exception e) {
-                log.error("[CSVFileReader] Error closing parser", e);
+                log.error("[CsvFileReader] Error closing parser", e);
             }
             parser = null;
         }
@@ -156,7 +165,7 @@ public class CsvFileReader implements DataReader {
             try {
                 reader.close();
             } catch (Exception e) {
-                log.error("[CSVFileReader] Error closing reader", e);
+                log.error("[CsvFileReader] Error closing reader", e);
             }
             reader = null;
         }
@@ -165,146 +174,136 @@ public class CsvFileReader implements DataReader {
     }
 
     private void validateSettings() {
-        log.info("[CSVFileReader] Validating file settings. path={}", fs != null ? fs.getFilePath() : null);
+        log.info("[CsvFileReader] Validating settings. path={}", fs != null ? fs.getFilePath() : null);
 
         if (fs == null) {
             throw new IllegalArgumentException("FileSettings is null");
         }
 
         if (fs.getFilePath() == null || fs.getFilePath().trim().isEmpty()) {
-            log.error("[CSVFileReader] Error. filePath is empty or null");
             throw new IllegalArgumentException("filePath is required");
         }
 
         if (fs.getFileType() == null || !"csv".equalsIgnoreCase(fs.getFileType().trim())) {
-            log.error("[CSVFileReader] Error. fileType must be 'csv'");
             throw new IllegalArgumentException("fileType must be 'csv'");
         }
 
         if (fs.getFileDelimiter() == null) {
-            log.error("[CSVFileReader] Error. fileDelimiter is null");
             throw new IllegalArgumentException("fileDelimiter is required");
         }
 
         if (fs.getFileDelimiter() == FileDelimiter.CUSTOM) {
             if (fs.getCustomDelimiter() == null || fs.getCustomDelimiter().isEmpty()) {
-                log.error("[CSVFileReader] Error. customDelimiter is null or empty when fileDelimiter=CUSTOM");
                 throw new IllegalArgumentException("customDelimiter is required when fileDelimiter=CUSTOM");
             }
         }
     }
 
     private static char resolveDelimiterChar(FileSettings fs) {
-        log.info("[CSVFileReader] Resolving delimiter char. fileDelimiter={}", fs.getFileDelimiter());
+        FileDelimiter delimiter = fs.getFileDelimiter();
 
-        FileDelimiter d = fs.getFileDelimiter();
-
-        switch (d) {
+        switch (delimiter) {
             case COMMA:
                 return ',';
-
             case TAB:
                 return '\t';
-
             case PIPE:
                 return '|';
-
             case CUSTOM:
-                String cd = fs.getCustomDelimiter();
-                if (cd.length() != 1) {
-                    log.warn("[CSVFileReader] customDelimiter has length {}. Apache Commons CSV supports only 1 char delimiter. Using first char '{}'",
-                            cd.length(), cd.charAt(0));
+                String customDelimiter = fs.getCustomDelimiter();
+                if (customDelimiter.length() != 1) {
+                    throw new IllegalArgumentException(
+                            "Apache Commons CSV supports only a single character delimiter. customDelimiter=" + customDelimiter
+                    );
                 }
-                return cd.charAt(0);
-
+                return customDelimiter.charAt(0);
             default:
                 return ',';
         }
     }
 
-    private Map<String, Object> rowFromRecord(CSVRecord rec) {
-        if (rec.size() > headers.size()) {
-            extendHeadersTo(rec.size());
+    private Map<String, Object> rowFromRecord(CSVRecord record) {
+        if (record.size() > headers.size()) {
+            extendHeadersTo(record.size());
+            log.warn("[CsvFileReader] Row wider than header. recordNumber={}, rowColumns={}, headerColumns={}",
+                    record.getRecordNumber(), record.size(), headers.size());
         }
 
-        Map<String, Object> row = new LinkedHashMap<>(Math.max(headers.size(), 16));
+        Map<String, Object> row = new LinkedHashMap<>(Math.max(16, headers.size() * 2));
 
         for (int i = 0; i < headers.size(); i++) {
             String key = headers.get(i);
-            String val = (i < rec.size()) ? rec.get(i) : "";
-            row.put(key, val);
+            String value = i < record.size() ? record.get(i) : "";
+            row.put(key, value);
         }
 
         return row;
     }
 
     private void extendHeadersTo(int newSize) {
-        int old = headers.size();
-
-        for (int i = old; i < newSize; i++) {
+        int currentSize = headers.size();
+        for (int i = currentSize; i < newSize; i++) {
             headers.add("C" + i);
         }
-
-        log.warn("[CSVFileReader] Extended headers due to wider row. oldSize={}, newSize={}, headers={}",
-                old, newSize, headers);
     }
 
     private static List<String> generateHeaders(int count) {
-        List<String> h = new ArrayList<>(count);
-
+        List<String> generatedHeaders = new ArrayList<>(count);
         for (int i = 0; i < count; i++) {
-            h.add("C" + i);
+            generatedHeaders.add("C" + i);
         }
-
-        return h;
+        return generatedHeaders;
     }
 
-    private static List<String> normalizeHeaders(List<String> raw) {
+    private static List<String> normalizeHeaders(List<String> rawHeaders) {
         Map<String, Integer> seen = new HashMap<>();
-        List<String> out = new ArrayList<>(raw.size());
+        List<String> normalized = new ArrayList<>(rawHeaders.size());
 
-        for (int i = 0; i < raw.size(); i++) {
-            String base = raw.get(i) == null ? "" : raw.get(i).trim();
+        for (int i = 0; i < rawHeaders.size(); i++) {
+            String base = rawHeaders.get(i) == null ? "" : rawHeaders.get(i).trim();
 
             if (base.isEmpty()) {
                 base = "C" + i;
             }
 
-            int n = seen.getOrDefault(base, 0) + 1;
-            seen.put(base, n);
+            int count = seen.getOrDefault(base, 0) + 1;
+            seen.put(base, count);
 
-            out.add(n == 1 ? base : base + "_" + n);
+            normalized.add(count == 1 ? base : base + "_" + count);
         }
 
-        return out;
+        return normalized;
     }
 
-    private static List<String> recordToList(CSVRecord rec) {
-        List<String> out = new ArrayList<>(rec.size());
-
-        for (int i = 0; i < rec.size(); i++) {
-            out.add(rec.get(i));
+    private static List<String> recordToList(CSVRecord record) {
+        List<String> values = new ArrayList<>(record.size());
+        for (int i = 0; i < record.size(); i++) {
+            values.add(record.get(i));
         }
-
-        return out;
+        return values;
     }
 
-    private String safeRecordToString(CSVRecord rec) {
+    private String safeRecordToString(CSVRecord record) {
         try {
             StringBuilder sb = new StringBuilder();
 
-            for (int i = 0; i < rec.size(); i++) {
+            for (int i = 0; i < record.size(); i++) {
                 if (i > 0) {
                     sb.append(" | ");
                 }
-
-                String value = rec.get(i);
-                sb.append(value == null ? "" : value);
+                sb.append(record.get(i));
             }
 
             return sb.toString();
         } catch (Exception e) {
             return "<unable to render record>";
         }
+    }
+
+    private String printableDelimiter(char delimiter) {
+        if (delimiter == '\t') {
+            return "\\t";
+        }
+        return String.valueOf(delimiter);
     }
 }
