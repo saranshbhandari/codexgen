@@ -1,0 +1,54 @@
+protected void collectOutParams(CallableStatement cs,
+                                ExecuteStoredProcedureTaskSettings s,
+                                StoredProcResult result) throws SQLException {
+    if (s.getParams() == null) return;
+
+    for (int i = 0; i < s.getParams().size(); i++) {
+        var p = s.getParams().get(i);
+        String dir = p.getType() == null ? "IN" : p.getType().trim().toUpperCase(Locale.ROOT);
+
+        if ("OUT".equals(dir) || "INOUT".equals(dir)) {
+            String baseKey = normalizeName(p.getParameter());
+            String aliasKey = (p.getValue() != null && !p.getValue().isBlank()) ? p.getValue().trim() : null;
+
+            if (isCursorType(p.getDatatype())) {
+                Object raw = cs.getObject(i + 1);
+
+                List<Map<String, Object>> rows;
+                if (raw instanceof ResultSet rs) {
+                    try (rs) {
+                        rows = rsToList(rs);
+                    }
+                } else {
+                    rows = Collections.emptyList();
+                }
+
+                // out variables
+                result.getOutParams().put(baseKey, rows);
+                if (aliasKey != null) {
+                    result.getOutParams().put(aliasKey, rows);
+                }
+
+                // indexed storage
+                result.getResultSets().add(rows);
+
+                // named storage
+                result.getNamedResultSets().put(baseKey, rows);
+                if (aliasKey != null) {
+                    result.getNamedResultSets().put(aliasKey, rows);
+                }
+
+                log.debug("Cursor OUT collected name={} alias={} rows={}", baseKey, aliasKey, rows.size());
+            } else {
+                Object val = cs.getObject(i + 1);
+
+                result.getOutParams().put(baseKey, val);
+                if (aliasKey != null) {
+                    result.getOutParams().put(aliasKey, val);
+                }
+
+                log.debug("Scalar OUT collected name={} alias={} value={}", baseKey, aliasKey, val);
+            }
+        }
+    }
+}
