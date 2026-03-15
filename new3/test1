@@ -1,84 +1,96 @@
-List<List<Map<String, Object>>> indexedResultSets =
-        sp.getResultSets() == null ? new ArrayList<>() : new ArrayList<>(sp.getResultSets());
+private static List<PathToken> tokenizePath(String raw) {
+    List<PathToken> out = new ArrayList<>();
+    StringBuilder buf = new StringBuilder();
+    boolean inBracket = false;
+    boolean nullSafe = false;
 
-Map<String, Object> namedResultSetMap = buildResultSetMap(sp);
-Map<String, Object> outVariables = safeMap(sp.getOutParams());
+    for (int i = 0; i < raw.length(); i++) {
+        char c = raw.charAt(i);
 
-// Main grouped variables
-varstore.addVariable("${" + taskPrefix + "ResultSet}", indexedResultSets);
-varstore.addVariable("${" + taskPrefix + "NamedResultSet}", namedResultSetMap);
-varstore.addVariable("${" + taskPrefix + "OutVariables}", outVariables);
-varstore.addVariable("${" + taskPrefix + "UpdateCount}", sp.getUpdateCountSum());
+        if (!inBracket && c == '?' && i + 1 < raw.length() && raw.charAt(i + 1) == '.') {
+            nullSafe = true;
+            i++; // skip '.'
+            continue;
+        }
 
-// Shortcuts + metadata
-addResultSetShortcuts(taskPrefix, indexedResultSets, varstore);
+        if (!inBracket && c == '.') {
+            if (buf.length() > 0) {
+                out.add(new PathToken(buf.toString(), nullSafe));
+                buf.setLength(0);
+            }
+            nullSafe = false;
+            continue;
+        }
 
+        if (!inBracket && c == '[') {
+            if (buf.length() > 0) {
+                out.add(new PathToken(buf.toString(), nullSafe));
+                buf.setLength(0);
+            }
+            nullSafe = false;
+            inBracket = true;
+            continue;
+        }
 
+        if (inBracket && c == ']') {
+            if (buf.length() > 0) {
+                out.add(new PathToken(buf.toString(), false));
+                buf.setLength(0);
+            }
+            inBracket = false;
+            continue;
+        }
 
+        buf.append(c);
+    }
 
+    if (buf.length() > 0) {
+        out.add(new PathToken(buf.toString(), nullSafe));
+    }
 
-
-
-
-
-
-
-
-
-
-
-log.info(
-        "Stored procedure task completed. taskId={}, procedureName={}, resultSetKeys={}, outVariableKeys={}, updateCount={}, durationMs={}",
-        task.getId(),
-        s.getSpname(),
-        namedResultSetMap.keySet(),
-        outVariables.keySet(),
-        sp.getUpdateCountSum(),
-        (System.currentTimeMillis() - start)
-);
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-private void addResultSetShortcuts(String taskPrefix,
-                                   List<List<Map<String, Object>>> indexedResultSets,
-                                   VariableStore varstore) {
-
-    List<Map<String, Object>> firstResultSet =
-            indexedResultSets.size() >= 1 ? indexedResultSets.get(0) : Collections.emptyList();
-
-    varstore.addVariable("${" + taskPrefix + "FirstResultSet}", firstResultSet);
-    varstore.addVariable("${" + taskPrefix + "FirstResultSetCount}", firstResultSet.size());
-    varstore.addVariable("${" + taskPrefix + "FirstResultSetColumns}", extractColumns(firstResultSet));
-    varstore.addVariable("${" + taskPrefix + "FirstResultSetFirstRow}",
-            firstResultSet.isEmpty() ? Collections.emptyMap() : firstResultSet.get(0));
-    varstore.addVariable("${" + taskPrefix + "FirstResultSetLastRow}",
-            firstResultSet.isEmpty() ? Collections.emptyMap() : firstResultSet.get(firstResultSet.size() - 1));
-
-    List<Map<String, Object>> secondResultSet =
-            indexedResultSets.size() >= 2 ? indexedResultSets.get(1) : Collections.emptyList();
-
-    varstore.addVariable("${" + taskPrefix + "SecondResultSet}", secondResultSet);
-    varstore.addVariable("${" + taskPrefix + "SecondResultSetCount}", secondResultSet.size());
-    varstore.addVariable("${" + taskPrefix + "SecondResultSetColumns}", extractColumns(secondResultSet));
-    varstore.addVariable("${" + taskPrefix + "SecondResultSetFirstRow}",
-            secondResultSet.isEmpty() ? Collections.emptyMap() : secondResultSet.get(0));
-    varstore.addVariable("${" + taskPrefix + "SecondResultSetLastRow}",
-            secondResultSet.isEmpty() ? Collections.emptyMap() : secondResultSet.get(secondResultSet.size() - 1));
-
-    varstore.addVariable("${" + taskPrefix + "MainResultSet}", firstResultSet);
+    return out;
 }
+
+
+
+
+
+
+
+
+private Object resolveNext(Object cur, String key) {
+    try {
+        if (cur instanceof Map) {
+            return ((Map<?, ?>) cur).get(key);
+        }
+
+        if (cur instanceof List) {
+            int idx = Integer.parseInt(key.trim());
+            List<?> list = (List<?>) cur;
+            if (idx < 0 || idx >= list.size()) {
+                return null;
+            }
+            return list.get(idx);
+        }
+
+        if (cur.getClass().isArray()) {
+            int idx = Integer.parseInt(key.trim());
+            int len = Array.getLength(cur);
+            if (idx < 0 || idx >= len) {
+                return null;
+            }
+            return Array.get(cur, idx);
+        }
+
+        Method m = cur.getClass().getMethod(
+                "get" + Character.toUpperCase(key.charAt(0)) + key.substring(1)
+        );
+        return m.invoke(cur);
+
+    } catch (Exception e) {
+        return null;
+    }
+}
+
+
+
