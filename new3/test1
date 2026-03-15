@@ -1,0 +1,121 @@
+package com.yourpackage.task.processor;
+
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.stereotype.Service;
+
+import javax.sql.DataSource;
+import java.text.MessageFormat;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+
+@Slf4j
+@Service
+public class CallStoredProcedureTaskProcessor implements ITaskProcessor {
+
+    @Autowired
+    ConnectionPoolFactory connectionPoolFactory;
+
+    @Override
+    public TaskStatus ProcessTask(ETLTask task, JobDetails jd, VariableStore varstore) {
+        String logPrefix = MessageFormat.format(
+                "Execute Stored Procedure Task.TaskId:{0},TName:{1},ProcBy:{2} :",
+                task.getId(), task.getName(), jd.getConsumerName()
+        );
+
+        try {
+            log.info(logPrefix + "Starting Task");
+
+            ExecuteStoredProcedureTaskSettings s =
+                    task.getSettingsAsType(ExecuteStoredProcedureTaskSettings.class);
+
+            this.resolveSettingsVariables(s, varstore);
+
+            DataSource ds = connectionPoolFactory.getConnectionPool(s.getDatabaseId());
+            StoredProcedureExecutor executor =
+                    StoredProcedureExecutorFactory.forType(s.getDatabaseType());
+
+            StoredProcResult sp = executor.execute(ds, s);
+
+            String taskPrefix = "Task" + task.getId() + ".";
+
+            Map<String, Object> outVariables = safeMap(sp.getOutParams());
+            Map<String, Object> namedResultSet = safeMap(sp.getNamedResultSets());
+            List<List<Map<String, Object>>> indexedResultSet = safeList(sp.getResultSets());
+
+            // Main grouped variables
+            varstore.addVariable("${" + taskPrefix + "OutVariables}", outVariables);
+            varstore.addVariable("${" + taskPrefix + "NamedResultSet}", namedResultSet);
+            varstore.addVariable("${" + taskPrefix + "ResultSet}", indexedResultSet);
+            varstore.addVariable("${" + taskPrefix + "UpdateCount}", sp.getUpdateCountSum());
+
+            // First resultset shortcuts
+            List<Map<String, Object>> firstResultSet = indexedResultSet.size() > 0
+                    ? indexedResultSet.get(0)
+                    : Collections.emptyList();
+
+            varstore.addVariable("${" + taskPrefix + "FirstResultSet}", firstResultSet);
+            varstore.addVariable("${" + taskPrefix + "FirstResultSetCount}", firstResultSet.size());
+            varstore.addVariable("${" + taskPrefix + "FirstResultSetColumns}", extractColumns(firstResultSet));
+            varstore.addVariable("${" + taskPrefix + "FirstResultSetFirstRow}",
+                    firstResultSet.isEmpty() ? Collections.emptyMap() : firstResultSet.get(0));
+            varstore.addVariable("${" + taskPrefix + "FirstResultSetLastRow}",
+                    firstResultSet.isEmpty() ? Collections.emptyMap() : firstResultSet.get(firstResultSet.size() - 1));
+
+            // Second resultset shortcuts
+            List<Map<String, Object>> secondResultSet = indexedResultSet.size() > 1
+                    ? indexedResultSet.get(1)
+                    : Collections.emptyList();
+
+            varstore.addVariable("${" + taskPrefix + "SecondResultSet}", secondResultSet);
+            varstore.addVariable("${" + taskPrefix + "SecondResultSetCount}", secondResultSet.size());
+            varstore.addVariable("${" + taskPrefix + "SecondResultSetColumns}", extractColumns(secondResultSet));
+            varstore.addVariable("${" + taskPrefix + "SecondResultSetFirstRow}",
+                    secondResultSet.isEmpty() ? Collections.emptyMap() : secondResultSet.get(0));
+            varstore.addVariable("${" + taskPrefix + "SecondResultSetLastRow}",
+                    secondResultSet.isEmpty() ? Collections.emptyMap() : secondResultSet.get(secondResultSet.size() - 1));
+
+            // Optional main shortcut
+            varstore.addVariable("${" + taskPrefix + "MainResultSet}", firstResultSet);
+
+            log.info("{}Completed Successfully", logPrefix);
+            return TaskStatus.Success;
+
+        } catch (Exception ex) {
+            log.error(logPrefix + "Task Failed. Error: " + ex.getMessage(), ex);
+            return TaskStatus.Failure;
+        }
+    }
+
+    private void resolveSettingsVariables(ExecuteStoredProcedureTaskSettings s, VariableStore varstore) {
+        if (s == null || s.getParams() == null) return;
+
+        for (ExecuteStoredProcedureTaskSettings.Parameter parameter : s.getParams()) {
+            String type = parameter.getType() == null ? "IN" : parameter.getType().trim();
+            if ("IN".equalsIgnoreCase(type) || "INOUT".equalsIgnoreCase(type)) {
+                parameter.setValue(varstore.resolveVariables(parameter.getValue()));
+            }
+        }
+    }
+
+    private Map<String, Object> safeMap(Map<String, Object> map) {
+        return map == null ? new LinkedHashMap<>() : new LinkedHashMap<>(map);
+    }
+
+    private List<List<Map<String, Object>>> safeList(List<List<Map<String, Object>>> list) {
+        return list == null ? new ArrayList<>() : new ArrayList<>(list);
+    }
+
+    private List<String> extractColumns(List<Map<String, Object>> rows) {
+        if (rows == null || rows.isEmpty()) {
+            return Collections.emptyList();
+        }
+        Map<String, Object> firstRow = rows.get(0);
+        if (firstRow == null || firstRow.isEmpty()) {
+            return Collections.emptyList();
+        }
+        return new ArrayList<>(firstRow.keySet());
+    }
+}
