@@ -1,0 +1,77 @@
+/* TOC wrapper */
+.dfetableofcontent,
+.dfetableofcontent .toc-macro {
+  font-family: Arial, sans-serif;
+  line-height: 1.5;
+}
+
+/* Remove bullets and reset spacing */
+.dfetableofcontent ul,
+.dfetableofcontent .toc-indentation,
+.dfetableofcontent .toc-macro ul {
+  list-style: none !important;
+  margin: 0;
+  padding-left: 0;
+}
+
+/* Base list item spacing */
+.dfetableofcontent li {
+  margin: 4px 0;
+  padding: 0;
+}
+
+/* Base link style */
+.dfetableofcontent a,
+.dfetableofcontent .toc-link {
+  text-decoration: none;
+  display: inline-block;
+}
+
+/* Level 1 */
+.dfetableofcontent > ul > li > a,
+.dfetableofcontent .toc-indentation > li > a {
+  font-size: 20px;
+  font-weight: 700;
+  color: #1d4ed8;
+}
+
+/* Level 2 */
+.dfetableofcontent .toc-indentation > li > ul,
+.dfetableofcontent ul ul {
+  margin-left: 20px;
+}
+
+.dfetableofcontent .toc-indentation > li > ul > li > a,
+.dfetableofcontent ul ul > li > a {
+  font-size: 17px;
+  font-weight: 600;
+  color: #059669;
+}
+
+/* Level 3 */
+.dfetableofcontent ul ul ul {
+  margin-left: 20px;
+}
+
+.dfetableofcontent ul ul ul > li > a {
+  font-size: 15px;
+  font-weight: 500;
+  color: #dc2626;
+}
+
+/* Level 4 */
+.dfetableofcontent ul ul ul ul {
+  margin-left: 20px;
+}
+
+.dfetableofcontent ul ul ul ul > li > a {
+  font-size: 14px;
+  font-weight: 500;
+  color: #9333ea;
+}
+
+/* Hover */
+.dfetableofcontent a:hover,
+.dfetableofcontent .toc-link:hover {
+  text-decoration: underline;
+}
