@@ -1,40 +1,50 @@
 
-.dfetableofcontent ul {
+/* Only target the TOC macro */
+div.dfetableofcontent.toc-macro {
+  font-family: Arial, sans-serif;
+  line-height: 1.5;
+}
+
+/* Reset TOC list only */
+div.dfetableofcontent.toc-macro ul,
+div.dfetableofcontent.toc-macro li {
   list-style: none !important;
+  margin: 0;
+  padding: 0;
 }
 
-.dfetableofcontent li {
-  margin: 4px 0;
+/* TOC links only */
+div.dfetableofcontent.toc-macro a {
+  text-decoration: none !important;
+  display: inline-block;
 }
 
-.dfetableofcontent li.toclevel-1 > a,
-.dfetableofcontent ul > li > a {
+/* Level 1 */
+div.dfetableofcontent.toc-macro > ul > li > a,
+div.dfetableofcontent.toc-macro > .toc-indentation > ul > li > a,
+div.dfetableofcontent.toc-macro .toc-indentation > li > a {
   color: #1d4ed8 !important;
   font-size: 20px !important;
   font-weight: 700 !important;
 }
 
-.dfetableofcontent li.toclevel-2 > a,
-.dfetableofcontent ul ul > li > a {
+/* Level 2 */
+div.dfetableofcontent.toc-macro ul ul > li > a {
   color: #059669 !important;
   font-size: 17px !important;
   font-weight: 600 !important;
 }
 
-.dfetableofcontent li.toclevel-3 > a,
-.dfetableofcontent ul ul ul > li > a {
+/* Level 3 */
+div.dfetableofcontent.toc-macro ul ul ul > li > a {
   color: #dc2626 !important;
   font-size: 15px !important;
   font-weight: 500 !important;
 }
 
-.dfetableofcontent li.toclevel-4 > a,
-.dfetableofcontent ul ul ul ul > li > a {
+/* Level 4 */
+div.dfetableofcontent.toc-macro ul ul ul ul > li > a {
   color: #9333ea !important;
   font-size: 14px !important;
   font-weight: 500 !important;
-}
-
-.dfetableofcontent a {
-  text-decoration: none !important;
 }
