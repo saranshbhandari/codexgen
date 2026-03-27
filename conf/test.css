@@ -1,0 +1,56 @@
+/* Base container */
+.dfetableofcontent {
+  font-family: Arial, sans-serif;
+  line-height: 1.6;
+}
+
+/* Remove default bullets */
+.dfetableofcontent ul {
+  list-style: none;
+  padding-left: 0;
+  margin-left: 0;
+}
+
+/* General link styling */
+.dfetableofcontent a {
+  text-decoration: none;
+  display: block;
+  padding: 4px 0;
+}
+
+/* H1 (top-level headings) */
+.dfetableofcontent > ul > li > a {
+  font-size: 18px;
+  font-weight: bold;
+  color: #1a73e8; /* Blue */
+  margin-top: 10px;
+}
+
+/* H2 */
+.dfetableofcontent ul ul > li > a {
+  font-size: 16px;
+  font-weight: 600;
+  color: #188038; /* Green */
+  padding-left: 15px; /* Indent */
+}
+
+/* H3 */
+.dfetableofcontent ul ul ul > li > a {
+  font-size: 14px;
+  font-weight: normal;
+  color: #d93025; /* Red */
+  padding-left: 30px;
+}
+
+/* H4 */
+.dfetableofcontent ul ul ul ul > li > a {
+  font-size: 13px;
+  color: #f9ab00; /* Orange */
+  padding-left: 45px;
+}
+
+/* Hover effect */
+.dfetableofcontent a:hover {
+  text-decoration: underline;
+  opacity: 0.85;
+}
